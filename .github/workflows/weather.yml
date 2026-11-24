@@ -1,0 +1,52 @@
+name: Collect Gießen weather and publish Pages
+on:
+  schedule:
+    - cron: '0,30 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '*.py'
+      - 'tests/**'
+      - '.github/workflows/weather.yml'
+permissions:
+  contents: read
+concurrency:
+  group: weather-pages
+  cancel-in-progress: false
+jobs:
+  collect-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check calculation and archive behavior
+        run: python -m unittest discover -s tests -v
+      - name: Fetch, repair and check the weather archive
+        run: python collector.py --output site --start 2020-01-01
+      - name: Keep the archive permanently in Git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add site
+          if ! git diff --cached --quiet; then
+            git commit -m 'Update Gießen weather archive'
+            git push origin HEAD:main
+          fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+          retention-days: 1
+      - uses: actions/deploy-pages@v4
+        id: deployment
