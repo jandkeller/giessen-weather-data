@@ -19,27 +19,66 @@ import dwd
 def encode_month(rows):
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(["source", "timestamp", "temperature_c"])
-    for (source, stamp), value in sorted(rows.items()):
-        writer.writerow([source, stamp, "" if value is None else format(value, ".1f")])
+    writer.writerow(["timestamp", "temperature_c", "source", "samples"])
+    for stamp, (value, source, count) in sorted(rows.items()):
+        writer.writerow([stamp, "" if value is None else format(value, ".8g"), source, count])
     return output.getvalue().encode()
 
 
 def decode_month(body):
-    result = {}
     reader = csv.DictReader(io.StringIO(body.decode()))
-    if reader.fieldnames != ["source", "timestamp", "temperature_c"]:
-        raise ValueError("Invalid archive columns")
+    if reader.fieldnames != ["timestamp", "temperature_c", "source", "samples"]:
+        raise ValueError("Invalid hourly archive columns")
+    result = {}
     for row in reader:
-        source, stamp = row["source"], int(row["timestamp"])
-        if source not in {"10min", "hourly"}:
-            raise ValueError("Invalid archive source")
-        raw = row["temperature_c"]
-        value = float(raw) if raw else None
+        stamp, source, count = int(row["timestamp"]), row["source"], int(row["samples"])
+        value = float(row["temperature_c"]) if row["temperature_c"] else None
+        if stamp % 3600 or stamp in result or source not in {"10min", "hourly", "missing"} or not 0 <= count <= 6:
+            raise ValueError("Invalid hourly archive record")
+        if (source == "missing") != (value is None) or source == "10min" and count != 6:
+            raise ValueError("Invalid hourly archive coverage")
         if value is not None and (not math.isfinite(value) or value == -999):
-            raise ValueError("Invalid archive temperature")
-        result[(source, stamp)] = value
+            raise ValueError("Invalid temperature")
+        result[stamp] = (value, source, count)
     return result
+
+
+def aggregate(ten, hourly, previous, now):
+    rows = dict(previous)
+    first, last = min(ten, default=0), max(ten, default=0)
+    for stamp in sorted({t // 3600 * 3600 for t in ten} | set(hourly)):
+        if stamp + 3600 > now.timestamp():
+            continue  # only completed hours; current hour is still pending
+        values = [ten.get(t) for t in range(stamp, stamp + 3600, 600)]
+        count = sum(value is not None for value in values)
+        observed_range = first <= stamp and last >= stamp + 3000
+        old = rows.get(stamp)
+        if count == 6:
+            rows[stamp] = (sum(values) / 6, "10min", 6)
+        elif old and old[1] == "10min" and not observed_range:
+            continue  # partial rolling archive edge or failed download cannot erase known data
+        elif hourly.get(stamp) is not None:
+            rows[stamp] = (hourly[stamp], "hourly", count if observed_range or old is None else old[2])
+        elif observed_range or old is None:
+            rows[stamp] = (None, "missing", count)
+    return rows
+
+
+def evaluate_hours(rows, start, end):
+    total, ten_seconds, fallback_seconds = 0.0, 0.0, 0.0
+    for stamp, (value, source, count) in rows.items():
+        seconds = max(0, min(end.timestamp(), stamp + 3600) - max(start.timestamp(), stamp))
+        if seconds <= 0 or value is None:
+            continue
+        total += max(20 - value, 0) * seconds / 86400
+        if source == "10min":
+            ten_seconds += seconds
+        else:
+            fallback_seconds += seconds
+    requested = max(0, (end - start).total_seconds())
+    return {"kelvin_days": total, "covered_seconds": ten_seconds + fallback_seconds,
+            "hourly_fallback_seconds": fallback_seconds, "ten_minute_seconds": ten_seconds,
+            "requested_seconds": requested, "complete": requested > 0 and requested - ten_seconds - fallback_seconds < 1}
 
 
 def write_atomic(path, body):
@@ -89,48 +128,53 @@ def collect(output, start, now=None):
     if not any(incoming.values()):
         raise RuntimeError("All DWD downloads failed; previous archive is unchanged")
 
-    months = {}
+    previous = {}
     for month, info in old["months"].items():
-        if re.fullmatch(r"\d{4}-\d{2}", month) is None or info["file"] != f"months/{month}.csv":
+        if re.fullmatch(r"\d{4}-\d{2}", month) is None or info["file"] not in {f"months/{month}.csv", f"hours/{month}.csv"}:
             raise ValueError("Invalid archive path")
         body = (output / info["file"]).read_bytes()
         if hashlib.sha256(body).hexdigest() != info["sha256"]:
             raise ValueError(f"Archive checksum mismatch: {month}")
-        months[month] = decode_month(body)
-    changed = set()
-    for source, samples in incoming.items():
-        for stamp, value in samples.items():
-            if start.timestamp() <= stamp <= now.timestamp():
-                month = datetime.fromtimestamp(stamp, dwd.UTC).strftime("%Y-%m")
-                rows = months.setdefault(month, {})
-                if (source, stamp) not in rows or rows[source, stamp] != value:
-                    rows[source, stamp] = value
-                    changed.add(month)
-    descriptors = dict(old["months"])
-    for month in sorted(changed):
-        body = encode_month(months[month])
-        path = f"months/{month}.csv"
+        if old.get("schema_version") == 2:
+            previous.update(decode_month(body))
+        else:
+            # One-time migration of the initial raw archive to hourly aggregates.
+            reader = csv.DictReader(io.StringIO(body.decode()))
+            for row in reader:
+                source, stamp = row["source"], int(row["timestamp"])
+                incoming[source].setdefault(stamp, float(row["temperature_c"]) if row["temperature_c"] else None)
+    ten = {t: v for t, v in incoming["10min"].items() if start.timestamp() <= t <= now.timestamp()}
+    hourly = {t: v for t, v in incoming["hourly"].items() if start.timestamp() <= t <= now.timestamp()}
+    rows = aggregate(ten, hourly, previous, now)
+    months = {}
+    for stamp, value in rows.items():
+        month = datetime.fromtimestamp(stamp, dwd.UTC).strftime("%Y-%m")
+        months.setdefault(month, {})[stamp] = value
+    descriptors = {}
+    for month, values in sorted(months.items()):
+        body = encode_month(values)
+        path = f"hours/{month}.csv"
         write_atomic(output / path, body)
-        descriptors[month] = {"file": path, "sha256": hashlib.sha256(body).hexdigest(), "rows": len(months[month])}
-    ten = {stamp: value for rows in months.values() for (source, stamp), value in rows.items() if source == "10min"}
-    hourly = {stamp: value for rows in months.values() for (source, stamp), value in rows.items() if source == "hourly"}
-    cutoff = int((now - timedelta(hours=1)).timestamp()) // 600 * 600
-    expected = range(math.ceil(start.timestamp() / 600) * 600, cutoff + 1, 600)
-    missing = [stamp for stamp in expected if ten.get(stamp) is None]
+        descriptors[month] = {"file": path, "sha256": hashlib.sha256(body).hexdigest(), "rows": len(values)}
+    due_end = int((now - timedelta(hours=1)).timestamp()) // 3600 * 3600
+    expected = range(math.ceil(start.timestamp() / 3600) * 3600, due_end, 3600)
+    missing = [stamp for stamp in expected if rows.get(stamp, (None, "missing", 0))[0] is None]
+    incomplete = [stamp for stamp in expected if rows.get(stamp, (None, "missing", 0))[2] != 6]
     yesterday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    yesterday_result = dwd.evaluate(ten, hourly, yesterday, yesterday + timedelta(days=1))
-    status = {"schema_version": 1, "station_id": "01639", "station_name": "Gießen/Wettenberg",
+    yesterday_result = evaluate_hours(rows, yesterday, yesterday + timedelta(days=1))
+    status = {"schema_version": 2, "station_id": "01639", "station_name": "Gießen/Wettenberg",
               "checked_at": dwd.iso(now), "archive_start": dwd.iso(start), "schedule": "0,30 * * * *",
-              "publication_grace_seconds": 3600, "expected_10min_through": dwd.iso(datetime.fromtimestamp(cutoff, dwd.UTC)),
-              "expected_10min_count": len(expected), "missing_10min_count": len(missing),
-              "missing_10min_first_100": [dwd.iso(datetime.fromtimestamp(t, dwd.UTC)) for t in missing[:100]],
-              "ten_minute_valid_count": sum(v is not None for v in ten.values()),
-              "hourly_valid_count": sum(v is not None for v in hourly.values()),
-              "latest_10min": dwd.iso(datetime.fromtimestamp(max((t for t, v in ten.items() if v is not None), default=int(start.timestamp())), dwd.UTC)),
+              "resolution_seconds": 3600, "aggregation": "mean of six instantaneous 10-minute observations per completed UTC hour",
+              "publication_grace_seconds": 3600, "expected_hours_before": dwd.iso(datetime.fromtimestamp(due_end, dwd.UTC)),
+              "expected_hour_count": len(expected), "missing_hour_count": len(missing),
+              "incomplete_10min_hour_count": len(incomplete),
+              "missing_hour_first_100": [dwd.iso(datetime.fromtimestamp(t, dwd.UTC)) for t in missing[:100]],
+              "aggregate_hour_count": sum(v[1] == "10min" for v in rows.values()),
+              "fallback_hour_count": sum(v[1] == "hourly" for v in rows.values()),
               "historical_checked_at": dwd.iso(now) if history_due and history_ok else old.get("historical_checked_at"),
               "download_errors": errors, "yesterday": yesterday_result,
               "attribution": "Deutscher Wetterdienst (DWD), CC BY 4.0; current data provisional"}
-    # Raw observations are retained; no TTL, no Actions cache/artifacts as permanent storage.
+    # Hourly aggregates are retained permanently; raw 10-minute observations are transient.
     manifest = dict(status, months=dict(sorted(descriptors.items())))
     write_atomic(output / "manifest.json", json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode())
     write_atomic(output / "status.json", json.dumps(status, ensure_ascii=False, indent=2, allow_nan=False).encode())
@@ -143,15 +187,17 @@ def collect(output, start, now=None):
     write_atomic(output / ".nojekyll", b"")
     page = f'''<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wetterarchiv Gießen</title>
 <style>body{{font:18px/1.6 system-ui;max-width:760px;margin:60px auto;padding:0 24px;color:#183c38;background:#f7faf8}}a{{color:#165c51}}small{{color:#536960}}</style>
-<h1>Wetterarchiv Gießen/Wettenberg</h1><p>DWD-Station 01639 · 10-Minuten-Temperaturen mit Stundenwerten als Ersatz bei Lücken.</p>
+<h1>Wetterarchiv Gießen/Wettenberg</h1><p>DWD-Station 01639 · Stundenmittel aus 10-Minuten-Messungen mit DWD-Stundenwerten als Ersatz bei Lücken.</p>
 <p>Letzter abgeschlossener Abruf: <strong>{html.escape(dwd.iso(now))}</strong> (UTC). Geplant um :00 und :30; GitHub kann Läufe verzögern.</p>
-<p>{status['ten_minute_valid_count']:,} gültige 10-Minuten-Messungen und {status['hourly_valid_count']:,} Stundenmessungen seit {start.date()}.</p>
+<p>{status['aggregate_hour_count']:,} Stundenmittel aus je sechs 10-Minuten-Messungen und {status['fallback_hour_count']:,} Ersatz-Stundenwerte seit {start.date()}.</p>
 <p>Gestern: {yesterday_result['kelvin_days']:.2f} K·Tage (Basis 20 °C), {100*yesterday_result['covered_seconds']/86400:.1f} % Abdeckung, davon {yesterday_result['hourly_fallback_seconds']/3600:.2f} Stunden Ersatzdaten.</p>
-<p>{len(errors)} Downloadfehler im letzten Lauf; {len(missing):,} fehlende 10-Minuten-Zeitpunkte im Archiv (letzte Stunde noch ausstehend).</p>
+<p>{len(errors)} Downloadfehler im letzten Lauf; {len(missing):,} fehlende Stunden im Archiv (letzte Stunde noch ausstehend).</p>
 <p><a href="status.json">Abrufstatus</a> · <a href="manifest.json">Dateiindex (JSON)</a> · <a href="manifest.csv">Dateiindex (CSV)</a></p>
 <small>Quelle: <a href="https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/">Deutscher Wetterdienst</a>, CC BY 4.0. Aktuelle Messungen sind vorläufig. Wetterdaten und Collector sind öffentlich; Verbrauchsdaten werden nicht erfasst.</small></html>'''
     write_atomic(output / "index.html", page.encode())
-    print(json.dumps({k: v for k, v in status.items() if k not in {"missing_10min_first_100", "yesterday"}}, ensure_ascii=False))
+    print(json.dumps({k: v for k, v in status.items() if k not in {"missing_hour_first_100", "yesterday"}}, ensure_ascii=False))
+    for raw in (output / "months").glob("*.csv"):
+        raw.unlink()
     return manifest
 
 

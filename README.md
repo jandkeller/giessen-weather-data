@@ -1,28 +1,26 @@
-# Wetterarchiv Gießen/Wettenberg
+# Stündliches Wetterarchiv Gießen/Wettenberg
 
-Öffentliche Wetterdaten für eine persönliche Heizverbrauchs-App: DWD-Station **01639**, 10-Minuten-Temperaturen und Stundenwerte als Ersatz bei Lücken. Die Referenztemperatur für Heizgradtage ist **20 °C**. Es werden keine Verbrauchsdaten, Zählerstände oder Zugangsschlüssel veröffentlicht.
+Öffentliche Wetterdaten für eine persönliche Heizverbrauchs-App: **DWD-Station 01639**. Aus je sechs gültigen 10-Minuten-Messungen entsteht ein Stundenmittel. Bei unvollständiger Stunde dient die DWD-Stundentemperatur derselben Station als gekennzeichneter Ersatz. Fehlt auch sie, bleibt die Stunde unbedeckt. Aktuelle Stunden werden erst nach ihrem Abschluss veröffentlicht.
 
-## Nutzung
+Es werden keine Verbrauchsdaten, Zählerstände oder Zugangsschlüssel veröffentlicht. Das Archiv beginnt 2020 und enthält in der aktuellen Fassung ausschließlich Stundenwerte; die 10-Minuten-Eingangsdaten werden temporär verarbeitet.
 
-GitHub Pages veröffentlicht eine Statusseite sowie folgende Dateien:
+## Dateien auf GitHub Pages
 
-- `status.json`: Zeitpunkt des letzten abgeschlossenen Abrufs, Datenabdeckung, Downloadfehler und Heizgradtage des Vortags.
-- `manifest.json` und `manifest.csv`: Monatsdateien mit SHA-256-Prüfsummen und Aktualisierungszeitpunkt.
-- `months/YYYY-MM.csv`: `source,timestamp,temperature_c`. Quelle `10min` oder `hourly`; Unixzeit in UTC-Sekunden, Temperatur in °C. Ein leeres Temperaturfeld ist ungültig/fehlend, nicht 0 °C.
+- `status.json`: letzter abgeschlossener Abruf, Vollständigkeit und Fehler sowie Heizgradtage des Vortags.
+- `manifest.json` und `manifest.csv`: verfügbare Monate, Aktualisierungszeitpunkt und SHA-256-Prüfsummen.
+- `hours/YYYY-MM.csv`: `timestamp,temperature_c,source,samples`. Unixzeit bezeichnet den UTC-Stundenbeginn; die Temperatur gilt für `[timestamp,timestamp+3600)`. `source=10min`: Mittel aus genau sechs Messungen um :00, :10, :20, :30, :40 und :50. `source=hourly`: DWD-Stundenmessung als gröbere Näherung. `source=missing`: kein verwendbarer Wert. Leeres Temperaturfeld bedeutet fehlend, niemals 0 °C. `samples` nennt die Zahl gültiger 10-Minuten-Messungen, höchstens sechs.
 
-Clients laden den Index und nur die für ihren Zeitraum benötigten Monate einschließlich einer Stunde Randbereich. Monatsdateien werden anhand der Prüfsummen validiert; bei CDN-Versatz muss der Index neu geladen werden. Messreihen bleiben getrennt. Bei der Berechnung werden positive Differenzen zu 20 °C zwischen direkt benachbarten gültigen Messpunkten linear integriert. Stundenwerte füllen ausschließlich unbedeckte Abschnitte. Fehlen geeignete Stundenwerte, bleibt die Lücke offen. Bei nachgelieferten 10-Minuten-Werten entfällt der Ersatz automatisch.
+Die App lädt nur die benötigten Monatsdateien und prüft deren SHA-256-Prüfsummen. **HDD20** wird aus den Stundenwerten berechnet: `max(20 − T_Stunde, 0) × abgedeckte Sekunden / 86400`. Teilstunden werden am tatsächlichen Ablesezeitpunkt abgeschnitten. Die Stundenauflösung ist eine Näherung und kann gegenüber einer Integration der einzelnen 10-Minuten-Messungen abweichen. Aus fehlenden Stunden werden keine Werte interpoliert. Der Anteil ersetzter Stunden wird getrennt ausgewiesen.
 
-## Betrieb
+## Automatischer Betrieb
 
-Der Workflow ist für **:00 und :30 UTC** geplant. GitHub kann geplante Läufe verzögern oder ausfallen lassen; es besteht keine Garantie für minutengenaue Ausführung. Im Actions-Tab lässt sich der Workflow auch manuell starten. Bei 60 Tagen ohne Repository-Aktivität kann GitHub Zeitpläne deaktivieren. Datenaktualisierungen werden hier mit einem regulären Commit archiviert.
+GitHub Actions startet planmäßig um **:00 und :30 UTC**, übernimmt neue Werte und Korrekturen und prüft das erwartete Zeitraster. Die letzte Stunde erhält eine Stunde Spielraum für Veröffentlichungsverzögerungen. Spätere 10-Minuten-Nachlieferungen ersetzen den Stundenfallback. Historische Archive werden beim Erstimport und danach alle sieben Tage erneut geprüft.
 
-Der Erstlauf lädt die verfügbaren Daten ab 2020. Anschließend werden bei jedem Lauf die rollierenden DWD-Archive `recent` und `now` erneut gelesen, um neue Werte, Lücken und Korrekturen zu übernehmen. Historische Archive werden alle sieben Tage erneut geprüft. Die Vollständigkeitsprüfung berücksichtigt alle erwarteten 10-Minuten-Zeitpunkte; die letzte Stunde wird für mögliche Veröffentlichungsverzögerungen ausgenommen. Die Auswertung selbst weist jede unbedeckte Zeit aus, auch innerhalb dieser Stunde.
+Der Bestand liegt dauerhaft in normalen Git-Dateien, nicht im Actions-Cache oder in kurzlebigen Artefakten. Alte Monate werden nicht gelöscht. Bei vollständigem Downloadausfall wird keine neue Fassung veröffentlicht. Bei Teilfehlern bleiben ältere Daten erhalten und Fehler erscheinen im Status. Integrität und Aktualität lassen sich über Prüfsummen und `checked_at` kontrollieren.
 
-Das dauerhafte Archiv liegt als normale Dateien im Git-Repository. Actions-Artefakte dienen ausschließlich dem Pages-Deployment. Ältere Monatsdateien werden nicht gelöscht. Bei vollständigem Downloadausfall wird keine neue Fassung veröffentlicht. Teilfehler werden sichtbar im Status protokolliert; alte Daten bleiben erhalten. Bei längeren Ausfällen deshalb immer `checked_at` prüfen.
+GitHub kann Zeitpläne verzögern oder Läufe auslassen. Bei 60 Tagen ohne Repository-Aktivität können Zeitpläne deaktiviert werden; reguläre Archivaktualisierungen erzeugen hier Commits. Im Actions-Tab kann ein Lauf manuell gestartet werden. Das öffentliche Repository nutzt kostenlose Standard-Linux-Runner und GitHub Pages innerhalb deren Nutzungsgrenzen; kein Google-Cloud-Konto oder eigener Cloud-Schlüssel ist nötig.
 
-Keine Zusatzbibliotheken, kostenpflichtigen Runner, Google-Cloud-Ressourcen oder eigenen Cloud-Schlüssel erforderlich. Das öffentliche Repository verwendet Standard-Linux-Runner und GitHub Pages im kostenlosen GitHub-Angebot, innerhalb der jeweiligen Nutzungsgrenzen.
-
-## Lokale Ausführung
+## Lokal prüfen
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -31,7 +29,7 @@ python3 collector.py --output site --start 2020-01-01
 
 ## Quellen und Lizenz
 
-Messdaten: **Deutscher Wetterdienst (DWD), CC BY 4.0**. Die veröffentlichten CSV-Dateien sind normalisierte Auszüge; aktuelle Daten sind vorläufig. Heizgradtage sind eigene Ableitungen.
+Messdaten: **Deutscher Wetterdienst (DWD), CC BY 4.0**. Die CSV-Dateien sind normalisierte und aggregierte Auszüge; aktuelle Werte sind vorläufig. Heizgradtage sind eigene Ableitungen.
 
 - https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/
 - https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/

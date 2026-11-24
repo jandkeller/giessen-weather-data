@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import sys
@@ -40,76 +41,83 @@ def downloads(ten, hourly):
 
 
 class ArchiveChecks(unittest.TestCase):
-    def test_roundtrip_and_nulls(self):
-        rows = {('10min', STAMP): None, ('hourly', STAMP): 2.1}
+    def test_mean_requires_six_valid_points(self):
+        ten = {STAMP+n*600: float(n) for n in range(6)}
+        result = collector.aggregate(ten, {STAMP: 99}, {}, START+timedelta(hours=1))
+        self.assertEqual(result[STAMP], (2.5, '10min', 6))
+        ten[STAMP+600] = None
+        result = collector.aggregate(ten, {STAMP: 9}, {}, START+timedelta(hours=1))
+        self.assertEqual(result[STAMP], (9, 'hourly', 5))
+        result = collector.aggregate(ten, {}, {}, START+timedelta(hours=1))
+        self.assertEqual(result[STAMP], (None, 'missing', 5))
+        self.assertFalse(collector.aggregate(ten, {}, {}, START+timedelta(minutes=50)))
+
+    def test_roundtrip_and_partial_hour_integral(self):
+        rows = {STAMP: (10, '10min', 6), STAMP+3600: (0, 'hourly', 5), STAMP+7200: (None, 'missing', 0)}
         self.assertEqual(collector.decode_month(collector.encode_month(rows)), rows)
+        result = collector.evaluate_hours(rows, START+timedelta(minutes=30), START+timedelta(hours=1, minutes=30))
+        self.assertAlmostEqual(result['kelvin_days'], (10*1800+20*1800)/86400)
+        self.assertEqual(result['hourly_fallback_seconds'],1800)
+        self.assertTrue(result['complete'])
         with self.assertRaises(ValueError):
-            collector.decode_month(b'source,timestamp,temperature_c\n10min,1,-999\n')
+            collector.decode_month(b'timestamp,temperature_c,source,samples\n0,10,10min,5\n')
 
     def test_publication_repair_and_retention(self):
         with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp)
-            with patch.object(dwd, 'fetch', downloads([(0, 10), (600, -999), (1200, 10)], [(0, 0), (3600, 0)])):
-                first = collector.collect(output, START, START + timedelta(hours=2))
-            self.assertEqual(first['expected_10min_count'], 7)
-            self.assertEqual(first['missing_10min_count'], 5)
-            rows = collector.decode_month((output / 'months/2026-11.csv').read_bytes())
-            ten = {t: v for (s, t), v in rows.items() if s == '10min'}
-            hour = {t: v for (s, t), v in rows.items() if s == 'hourly'}
-            fallback = dwd.evaluate(ten, hour, START, START + timedelta(hours=1))
-            self.assertTrue(fallback['complete'])
-            self.assertEqual(fallback['hourly_fallback_seconds'], 3600)
-            with patch.object(dwd, 'fetch', downloads([(n * 600, 10) for n in range(7)], [(0, 0), (3600, 0)])):
-                second = collector.collect(output, START, START + timedelta(hours=2))
-            self.assertEqual(second['missing_10min_count'], 0)
-            digest = second['months']['2026-11']['sha256']
-            import hashlib
-            self.assertEqual(hashlib.sha256((output / 'months/2026-11.csv').read_bytes()).hexdigest(), digest)
-            # A later refresh with a partial file keeps all older observations.
-            with patch.object(dwd, 'fetch', downloads([(86400, 5)], [])):
-                collector.collect(output, START, START + timedelta(days=1, hours=2))
-            rows = collector.decode_month((output / 'months/2026-11.csv').read_bytes())
-            self.assertEqual(rows['10min', STAMP + 600], 10)
-            self.assertEqual(rows['10min', STAMP + 86400], 5)
-            self.assertTrue((output / 'index.html').exists())
+            output=Path(temp)
+            with patch.object(dwd,'fetch',downloads([(0,10),(600,-999),(3000,10)],[(0,0)])):
+                first=collector.collect(output,START,START+timedelta(hours=2))
+            self.assertEqual(first['expected_hour_count'],1)
+            self.assertEqual(first['incomplete_10min_hour_count'],1)
+            self.assertEqual(first['fallback_hour_count'],1)
+            with patch.object(dwd,'fetch',downloads([(n*600,10) for n in range(6)],[(0,0)])):
+                second=collector.collect(output,START,START+timedelta(hours=2))
+            self.assertEqual(second['incomplete_10min_hour_count'],0)
+            self.assertEqual(second['fallback_hour_count'],0)
+            self.assertEqual(hashlib.sha256((output/'hours/2026-11.csv').read_bytes()).hexdigest(),second['months']['2026-11']['sha256'])
+            # The next file's left edge is partial; keep the known complete hour.
+            with patch.object(dwd,'fetch',downloads([(3000,10),(86400,5)],[(0,0)])):
+                collector.collect(output,START,START+timedelta(days=1,hours=2))
+            rows=collector.decode_month((output/'hours/2026-11.csv').read_bytes())
+            self.assertEqual(rows[STAMP],(10,'10min',6))
+            self.assertTrue((output/'index.html').exists())
 
-    def test_failed_download_retains_published_state(self):
+    def test_total_failure_does_not_publish(self):
         with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp)
-            with patch.object(dwd, 'fetch', downloads([(0, 10)], [])):
-                collector.collect(output, START, START + timedelta(hours=2))
-            original = {str(p): p.read_bytes() for p in output.rglob('*') if p.is_file()}
-            with patch.object(dwd, 'fetch', side_effect=OSError('unavailable')):
+            output=Path(temp)
+            with patch.object(dwd,'fetch',downloads([(0,10)],[])):
+                collector.collect(output,START,START+timedelta(hours=2))
+            original={str(p):p.read_bytes() for p in output.rglob('*') if p.is_file()}
+            with patch.object(dwd,'fetch',side_effect=OSError('unavailable')):
                 with self.assertRaises(RuntimeError):
-                    collector.collect(output, START, START + timedelta(hours=3))
-            self.assertEqual(original, {str(p): p.read_bytes() for p in output.rglob('*') if p.is_file()})
+                    collector.collect(output,START,START+timedelta(hours=3))
+            self.assertEqual(original,{str(p):p.read_bytes() for p in output.rglob('*') if p.is_file()})
 
-    def test_hash_mismatch_stops_publication(self):
+    def test_corruption_blocks_update(self):
         with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp)
-            with patch.object(dwd, 'fetch', downloads([(0, 10)], [])):
-                collector.collect(output, START, START + timedelta(hours=2))
-                (output / 'months/2026-11.csv').write_text('corrupt')
+            output=Path(temp)
+            with patch.object(dwd,'fetch',downloads([(0,10)],[])):
+                collector.collect(output,START,START+timedelta(hours=2))
+                (output/'hours/2026-11.csv').write_text('corrupt')
                 with self.assertRaises(ValueError):
-                    collector.collect(output, START, START + timedelta(hours=3))
+                    collector.collect(output,START,START+timedelta(hours=3))
 
-    def test_no_double_count_and_partial_intervals(self):
-        ten = {STAMP: 10, STAMP + 600: 10, STAMP + 1200: None, STAMP + 1800: 10, STAMP + 2400: 10, STAMP + 3000: 10, STAMP + 3600: 10}
-        result = dwd.evaluate(ten, {STAMP: 0, STAMP + 3600: 0}, START, START + timedelta(hours=1))
-        self.assertEqual(result['ten_minute_seconds'], 2400)
-        self.assertEqual(result['hourly_fallback_seconds'], 1200)
-        self.assertAlmostEqual(result['kelvin_days'], (2400 * 10 + 1200 * 20) / 86400)
-        crossing = dwd.evaluate({}, {STAMP: 10, STAMP + 3600: 30}, START + timedelta(minutes=15), START + timedelta(minutes=45))
-        self.assertAlmostEqual(crossing['kelvin_days'], 2250 / 86400)
-        missing = dwd.evaluate({}, {STAMP: 10, STAMP + 7200: 10}, START, START + timedelta(hours=2))
-        self.assertEqual(missing['covered_seconds'], 0)
-
-    def test_missing_whole_day_is_counted(self):
+    def test_empty_day_and_raw_archive_migration(self):
         with tempfile.TemporaryDirectory() as temp:
-            with patch.object(dwd, 'fetch', downloads([], [(0, 10), (3600, 10)])):
-                result = collector.collect(Path(temp), START, START + timedelta(days=2, hours=1))
-            self.assertEqual(result['missing_10min_count'], 289)
+            output=Path(temp)
+            (output/'months').mkdir()
+            raw='source,timestamp,temperature_c\n'+''.join(f'10min,{STAMP+n*600},10.0\n' for n in range(6))
+            (output/'months/2026-11.csv').write_text(raw)
+            manifest={'schema_version':1,'months':{'2026-11':{'file':'months/2026-11.csv','sha256':hashlib.sha256(raw.encode()).hexdigest()}}}
+            (output/'manifest.json').write_text(json.dumps(manifest))
+            with patch.object(dwd,'fetch',downloads([],[(86400,5)])):
+                result=collector.collect(output,START,START+timedelta(days=2,hours=1))
+            rows=collector.decode_month((output/'hours/2026-11.csv').read_bytes())
+            self.assertEqual(rows[STAMP],(10,'10min',6))
+            self.assertEqual(result['expected_hour_count'],48)
+            self.assertEqual(result['missing_hour_count'],46)
+            self.assertFalse((output/'months/2026-11.csv').exists())
 
 
-if __name__ == '__main__':
+if __name__=='__main__':
     unittest.main()
