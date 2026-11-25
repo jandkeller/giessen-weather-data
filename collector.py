@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import dwd
+import mosmix
 
 
 def encode_month(rows):
@@ -162,6 +163,7 @@ def collect(output, start, now=None):
     incomplete = [stamp for stamp in expected if rows.get(stamp, (None, "missing", 0))[2] != 6]
     yesterday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     yesterday_result = evaluate_hours(rows, yesterday, yesterday + timedelta(days=1))
+    forecast = mosmix.collect(output, now)
     status = {"schema_version": 2, "station_id": "01639", "station_name": "Gießen/Wettenberg",
               "checked_at": dwd.iso(now), "archive_start": dwd.iso(start), "schedule": "0,30 * * * *",
               "resolution_seconds": 3600, "aggregation": "mean of six instantaneous 10-minute observations per completed UTC hour",
@@ -172,7 +174,7 @@ def collect(output, start, now=None):
               "aggregate_hour_count": sum(v[1] == "10min" for v in rows.values()),
               "fallback_hour_count": sum(v[1] == "hourly" for v in rows.values()),
               "historical_checked_at": dwd.iso(now) if history_due and history_ok else old.get("historical_checked_at"),
-              "download_errors": errors, "yesterday": yesterday_result,
+              "download_errors": errors, "yesterday": yesterday_result, "forecast": forecast,
               "attribution": "Deutscher Wetterdienst (DWD), CC BY 4.0; current data provisional"}
     # Hourly aggregates are retained permanently; raw 10-minute observations are transient.
     manifest = dict(status, months=dict(sorted(descriptors.items())))
@@ -192,6 +194,7 @@ def collect(output, start, now=None):
 <p>{status['aggregate_hour_count']:,} Stundenmittel aus je sechs 10-Minuten-Messungen und {status['fallback_hour_count']:,} Ersatz-Stundenwerte seit {start.date()}.</p>
 <p>Gestern: {yesterday_result['kelvin_days']:.2f} K·Tage (Basis 20 °C), {100*yesterday_result['covered_seconds']/86400:.1f} % Abdeckung, davon {yesterday_result['hourly_fallback_seconds']/3600:.2f} Stunden Ersatzdaten.</p>
 <p>{len(errors)} Downloadfehler im letzten Lauf; {len(missing):,} fehlende Stunden im Archiv (letzte Stunde noch ausstehend).</p>
+<p>MOSMIX-Prognose Gießen 10532: {html.escape(forecast.get("issued_at", "nicht verfügbar"))} · <a href="forecast/latest.csv">Vorhersage-Dateiindex</a>.</p>
 <p><a href="status.json">Abrufstatus</a> · <a href="manifest.json">Dateiindex (JSON)</a> · <a href="manifest.csv">Dateiindex (CSV)</a></p>
 <small>Quelle: <a href="https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/">Deutscher Wetterdienst</a>, CC BY 4.0. Aktuelle Messungen sind vorläufig. Wetterdaten und Collector sind öffentlich; Verbrauchsdaten werden nicht erfasst.</small></html>'''
     write_atomic(output / "index.html", page.encode())
