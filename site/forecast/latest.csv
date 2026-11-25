@@ -1,0 +1,2 @@
+station_id,issued_at,checked_at,file,sha256
+10532,2026-11-25T15:00:00Z,2026-11-25T20:25:02.194240Z,forecast/runs/1795618800-886dbcf6c9e55ae0.csv,886dbcf6c9e55ae0d8ef04c02e255e1f0d80970f716ef2fe8a1d5f6ba2e95e35
