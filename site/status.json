@@ -2,14 +2,14 @@
   "schema_version": 2,
   "station_id": "01639",
   "station_name": "Gießen/Wettenberg",
-  "checked_at": "2026-11-27T02:21:44.720568Z",
+  "checked_at": "2026-11-27T11:13:57.483766Z",
   "archive_start": "2020-01-01T00:00:00Z",
   "schedule": "0,30 * * * *",
   "resolution_seconds": 3600,
   "aggregation": "mean of six instantaneous 10-minute observations per completed UTC hour",
   "publication_grace_seconds": 3600,
-  "expected_hours_before": "2026-11-27T01:00:00Z",
-  "expected_hour_count": 60529,
+  "expected_hours_before": "2026-11-27T10:00:00Z",
+  "expected_hour_count": 60538,
   "missing_hour_count": 723,
   "incomplete_10min_hour_count": 760,
   "missing_hour_first_100": [
@@ -114,7 +114,7 @@
     "2023-09-02T06:00:00Z",
     "2023-09-02T07:00:00Z"
   ],
-  "aggregate_hour_count": 59770,
+  "aggregate_hour_count": 59778,
   "fallback_hour_count": 37,
   "historical_checked_at": "2026-11-24T13:26:39.715003Z",
   "download_errors": [],
@@ -128,15 +128,15 @@
   },
   "forecast": {
     "station_id": "10532",
-    "issued_at": "2026-11-26T21:00:00Z",
-    "checked_at": "2026-11-27T02:21:44.720568Z",
-    "file": "forecast/runs/1795726800-89b216239431fa57.csv",
-    "sha256": "89b216239431fa57ccf578e58a54e7d1c4e19c18ae699a70800885492e1c004d",
+    "issued_at": "2026-11-27T09:00:00Z",
+    "checked_at": "2026-11-27T11:13:57.483766Z",
+    "file": "forecast/runs/1795770000-2b03513484be6192.csv",
+    "sha256": "2b03513484be619233383fd4b03f86590e944c65356ceac8aab1fcdf7e553cdc",
     "available": true,
     "download_ok": true,
     "points": 247,
-    "first_timestamp": 1795730400,
-    "last_timestamp": 1796616000
+    "first_timestamp": 1795773600,
+    "last_timestamp": 1796659200
   },
   "attribution": "Deutscher Wetterdienst (DWD), CC BY 4.0; current data provisional"
 }
